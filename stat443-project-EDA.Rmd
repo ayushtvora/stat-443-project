@@ -1,0 +1,329 @@
+---
+title: "Project443"
+author: "Shahrukh Islam Prithibi"
+date: "2026-04-07"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+First we will import libraries and set seeds.
+
+```{r import_data, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(forecast)
+set.seed(443)
+```
+
+Next, appropriately rename labels and set date column correctly.
+
+```{r rename_labels, warning=FALSE}
+url <- paste0(
+  "https://raw.githubusercontent.com/ShahrukhP15/",
+  "Time-Series-Forecasting-of-U.S.-Fuel-Price-Spreads/",
+  "refs/heads/main/PET_PRI_GND_DCUS_NUS_W.csv"
+)
+df <- read_csv(file = url, show_col_types = FALSE)
+new_col_names <- c( 
+  all_grades_all_forms = "A1", all_grades_conv = "A2", all_grades_reform = "A3",
+  regular_all_forms = "R1", regular_conv = "R2", regular_reform = "R3", 
+  midgrade_all_forms = "M1", midgrade_conv = "M2", midgrade_reform = "M3",
+  premium_all_forms = "P1", premium_conv = "P2", premium_reform = "P3",
+  diesel = "D1")
+
+dataset <- df |>
+  rename(new_col_names) |>
+  mutate(Date = mdy(Date)) |> 
+  arrange(Date) |> 
+  drop_na()
+
+head(dataset)
+```
+
+Check if there are any gaps in the weekly data.
+
+``` {r data_checks}
+date_diffs <- dataset |>
+  mutate(diff = as.numeric(Date - lag(Date))) |>
+  filter(!is.na(diff))
+
+print(min(date_diffs$diff) - max(date_diffs$diff)) # If 0, then all values are equal, as needed.
+```
+
+Plot the data.
+
+```{r preliminary_plots}
+dataset |>
+  pivot_longer(cols = -Date, names_to = "type", values_to = "price") |>
+  ggplot(aes(x = Date, y = price, color = type)) +
+  geom_line(alpha = 0.7) +
+  labs(title = "Comparison of Fuel Prices Over Time",
+       x = "Date", y = "Price ($/gallon)", color = "Fuel Type") +
+  theme_minimal()
+```
+The gasoline price series across different grades and formulations exhibit highly similar trends over time, indicating strong correlation. Therefore, we focus on the all-grades series as a representative measure.
+
+Next, we will see how each one varies by gas grade.
+
+```{r gas_by_grade}
+dataset_log <- dataset |>
+mutate(across(-Date, ~ log(. / all_grades_all_forms)))
+
+dataset_log |>
+  select(-all_grades_all_forms) |>
+  pivot_longer(cols = -Date, names_to = "type", values_to = "log_ratio") |>
+  mutate(grade = case_when(
+    str_detect(type, "regular")    ~ "Regular",
+    str_detect(type, "midgrade")   ~ "Midgrade",
+    str_detect(type, "premium")    ~ "Premium",
+    str_detect(type, "all_grades") ~ "All Grades"
+  )) |>
+  filter(grade != "All Grades") |>
+  ggplot(aes(x = Date, y = log_ratio, color = grade, group = type)) +
+  geom_line(alpha = 0.6) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "By Grade", x = "Date", y = "Log Price Ratio", color = "Grade") +
+  theme_minimal()
+```
+
+Similarly, we will see how each plot varies by formulation.
+
+```{r gas_by_formulation}
+dataset_log |>
+  select(-all_grades_all_forms) |>
+  pivot_longer(cols = -Date, names_to = "type", values_to = "log_ratio") |>
+  mutate(formulation = case_when(
+    str_detect(type, "conv")   ~ "Conventional",
+    str_detect(type, "reform") ~ "Reformulated",
+    TRUE                       ~ "All Forms"
+  )) |>
+  filter(formulation != "All Forms") |>
+  ggplot(aes(x = Date, y = log_ratio, color = formulation, group = type)) +
+  geom_line(alpha = 0.6) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "By Formulation", x = "Date", y = "Log Price Ratio", color = "Formulation") +
+  theme_minimal()
+```
+
+Many of the exploratory plots above provide supporting evidence and may be moved to the appendix in the final report.
+
+In this paper, we want to find differences between diesel and gasoline. Let's plot some of these differences. First, modify the dataset to show the difference between diesel and all the other gasoline.
+
+```{r diesel_gas_diff}
+dataset_diff_diesel <- dataset |>
+  mutate(across(-c(Date), ~ . - diesel))
+
+```
+
+
+Next, we will plot the differences.
+
+```{r diesel_gas_plot}
+dataset_diff_diesel |>
+  select(-diesel) |>
+  pivot_longer(cols = -Date, names_to = "type", values_to = "diff") |>
+  ggplot(aes(x = Date, y = diff, color = type)) +
+  geom_line(alpha = 0.7) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "Gasoline Prices Relative to Diesel Over Time",
+       x = "Date", y = "Price - Diesel ($/gallon)", color = "Fuel Type") +
+  theme_minimal()
+```
+
+It looks like the different types of gas follow the same distribution, with some slight variance within each other. Either way, they are highly correlated. It will be good to focus on one type of gas instead of all of them, because they all show similar patterns.
+
+We will focus on All Grades All Forms, as it is a good baseline of all the different types of gas. We can plot this more clearly.
+
+```{r focused}
+dataset_focused <- dataset |>
+  select(Date, diesel, all_grades_all_forms) |>
+  mutate(diff = all_grades_all_forms - diesel)
+
+
+dataset_focused |>
+  ggplot(aes(x = Date, y = diff)) +
+  geom_line(alpha = 0.7) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "Gasoline vs. Diesel Price Difference Over Time",
+       x = "Date", y = "All Grades All Forms - Diesel ($/gallon)") +
+  theme_minimal()
+```
+
+Let's see what the graphs look like when logging it.
+
+```{r log_diffs}
+dataset_focused <- dataset_focused |>
+  mutate(
+    log_gas = log(all_grades_all_forms),
+    log_diesel = log(diesel),
+    log_ratio = log_gas - log_diesel
+  )
+
+
+dataset_focused |>
+  ggplot(aes(x = Date, y = log_ratio)) +
+  geom_line(alpha = 0.7) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "Log Ratio of Gasoline to Diesel Over Time",
+       x = "Date", y = "Log(Gas / Diesel)") +
+  theme_minimal()
+```
+
+
+Based on the graph above, it seems that the price difference between diesel and gas were somewhat stable before around 2008. However, since then, the price of gas has been consistently lower than diesel. It may be worth splitting our dataset up into before and after 2008 to see if the time series analysis that we do on them differs between these frames. There also seems to be somewhat regular shifts between spikes. This may indicate a level of seasonality. We will explore this more later. 
+
+
+Below we have a summary statistics table 
+
+```{r summary_statistics}
+summary_statistics <- dataset_focused |>
+  select(all_grades_all_forms, diesel, diff, log_ratio) |>
+  rename(
+    "Gasoline ($/gal)" = all_grades_all_forms,
+    "Diesel ($/gal)" = diesel,
+    "Spread ($/gal)" = diff,
+    "Log Ratio" = log_ratio
+  ) |>
+  pivot_longer(everything(), names_to = "Variable", values_to = "value") |>
+  group_by(Variable) |>
+  summarise(
+    Mean     = round(mean(value), 3),
+    SD       = round(sd(value), 3),
+    Min      = round(min(value), 3),
+    Max      = round(max(value), 3)
+  )
+
+summary_statistics
+```
+
+Next, we have ACF plots with the difference and log ratio
+
+```{r acf, warning=FALSE}
+gridExtra::grid.arrange(
+  ggAcf(dataset_focused$diff,      main = "ACF of Spread"),
+  ggAcf(dataset_focused$log_ratio, main = "ACF of Log Ratio of Spread"),
+  ncol = 2
+)
+```
+
+From this graph we can interpret a few things. Firstly, it seems that taking the log ratio
+does not seem to make much of a difference, as the ACF plot looks nearly the same. Second, because all the ACF values are large throughout, it indicates that the data may not be stationary. We will likely need to do some differencing to achieve stationarity. 
+
+We try to see the differenced spread. 
+
+```{r diff, warning=FALSE}
+# Create first-differenced spread to remove non-stationarity
+dataset_focused <- dataset_focused |>
+  mutate(diff_spread = c(NA, diff(diff)))
+
+# Plot the differenced spread to visually assess stationarity
+# We expect the series to fluctuate around zero with no clear trend
+dataset_focused |>
+  ggplot(aes(x = Date, y = diff_spread)) +
+  geom_line(color = "steelblue", alpha = 0.7) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(
+    title = "Differenced Gasoline-Diesel Spread Over Time",
+    x = "Date",
+    y = "First Difference of Spread"
+  ) +
+  theme_minimal()
+
+# # ACF of differenced spread to confirm stationarity
+# # Significant autocorrelation at early lags indicates short-term dependence
+# ggAcf(na.omit(dataset_focused$diff_spread),
+#       main = "ACF of Differenced Spread")
+# 
+# # PACF of differenced spread to help identify AR components
+# # Used later for selecting ARIMA(p, d, q) model
+# ggPacf(na.omit(dataset_focused$diff_spread),
+#        main = "PACF of Differenced Spread")
+
+gridExtra::grid.arrange(
+  ggAcf(na.omit(dataset_focused$diff_spread), 
+        main = "ACF of Differenced Spread"),
+  ggPacf(na.omit(dataset_focused$diff_spread), 
+         main = "PACF of Differenced Spread"),
+  ncol = 2
+)
+```
+
+
+
+The time plot of the differenced spread shows that the series fluctuates around zero with no clear trend and relatively stable variability over time, suggesting that first differencing has removed the non-stationarity present in the original series. The ACF of the differenced spread exhibits a strong positive autocorrelation at lag 1 followed by a rapid decay, with most subsequent lags falling within the confidence bounds, indicating short-term dependence. The PACF shows a significant spike at lag 1, with most other lags within the confidence bounds, suggesting that the series may have a dominant first-order autoregressive component.
+
+```{r logdiff, warning=FALSE}
+# Create first-differenced log ratio to assess stationarity
+dataset_focused <- dataset_focused |>
+  mutate(diff_log_ratio = c(NA, diff(log_ratio)))
+
+# Plot differenced log ratio to visually check stationarity
+# Expect fluctuations around zero with no trend
+dataset_focused |>
+  ggplot(aes(x = Date, y = diff_log_ratio)) +
+  geom_line(color = "darkorange", alpha = 0.7) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(
+    title = "Differenced Log Ratio (Gasoline/Diesel) Over Time",
+    x = "Date",
+    y = "First Difference of Log Ratio"
+  ) +
+  theme_minimal()
+
+# # ACF of differenced log ratio to confirm stationarity
+# ggAcf(na.omit(dataset_focused$diff_log_ratio),
+#       main = "ACF of Differenced Log Ratio")
+# 
+# # PACF of differenced log ratio to help identify AR components
+# ggPacf(na.omit(dataset_focused$diff_log_ratio),
+#        main = "PACF of Differenced Log Ratio")
+
+gridExtra::grid.arrange(
+  ggAcf(na.omit(dataset_focused$diff_log_ratio),
+      main = "ACF of Differenced Log Ratio"),
+  ggPacf(na.omit(dataset_focused$diff_log_ratio),
+       main = "PACF of Differenced Log Ratio"),
+  ncol = 2
+)
+
+```
+The time plot of the differenced log ratio shows that the series fluctuates around zero with no clear trend and relatively stable variability, indicating that first differencing has removed the non-stationarity present in the original log ratio series. The ACF of the differenced log ratio exhibits a strong positive autocorrelation at lag 1 followed by a rapid decay, with most subsequent lags falling within the confidence bounds, suggesting short-term dependence. The PACF shows a dominant spike at lag 1, with most other lags within the confidence bounds, indicating that the series may be well described by a first-order autoregressive structure.
+
+Both the spread and log ratio transformations exhibit very similar autocorrelation structures after differencing, suggesting that the log transformation does not substantially change the underlying dependence structure. For interpretability, we proceed with the spread in subsequent analysis.
+
+```{r ccf, warning=FALSE}
+
+# Create first-differenced gasoline and diesel series for cross-correlation analysis
+dataset_focused <- dataset_focused |>
+  mutate(
+    diff_gas = c(NA, diff(all_grades_all_forms)),
+    diff_diesel = c(NA, diff(diesel))
+  )
+
+# Plot the differenced gasoline and diesel series
+# This helps visually compare short-term movements after removing trend
+dataset_focused |>
+  select(Date, diff_gas, diff_diesel) |>
+  pivot_longer(cols = -Date, names_to = "series", values_to = "value") |>
+  ggplot(aes(x = Date, y = value, color = series)) +
+  geom_line(alpha = 0.7) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(
+    title = "Differenced Gasoline and Diesel Price Series",
+    x = "Date",
+    y = "First Difference ($/gallon)",
+    color = "Series"
+  ) +
+  theme_minimal()
+
+# Cross-correlation function to check whether one differenced series leads the other
+# This will help identify potential lagged explanatory variables for ARMAX
+ggCcf(
+  na.omit(dataset_focused$diff_gas),
+  na.omit(dataset_focused$diff_diesel),
+  main = "CCF of Differenced Gasoline and Diesel Prices"
+)
+```
+The differenced gasoline and diesel series display very similar short-term fluctuations over time, suggesting a strong relationship between the two. The CCF shows a dominant peak at lag 0, indicating that changes in gasoline and diesel prices occur simultaneously. While there are smaller significant correlations at nearby lags, there is no clear evidence of a consistent lead–lag relationship between the two series. This suggests that lagged diesel or gasoline variables may not provide substantial additional predictive power in an ARMAX framework.

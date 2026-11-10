@@ -1,0 +1,107 @@
+---
+title: "stat443-project-persistence-iid"
+output: pdf_document
+date: "2026-04-09"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(readr)
+library(dplyr)
+library(forecast)
+library(zoo)
+library(ggplot2)
+```
+
+
+```{r prepare_data}
+url <- paste0(
+  "https://raw.githubusercontent.com/ShahrukhP15/",
+  "Time-Series-Forecasting-of-U.S.-Fuel-Price-Spreads/",
+  "refs/heads/main/PET_PRI_GND_DCUS_NUS_W.csv"
+)
+df <- read_csv(file = url, show_col_types = FALSE)
+
+df <- df |>
+  mutate(
+    Date = as.Date(Date, format = "%m/%d/%Y"),
+    gasoline = A1,
+    diesel = D1,
+    spread = gasoline - diesel
+  ) |>
+  arrange(Date) |>
+  select(Date, gasoline, diesel, spread)
+```
+
+```{r rmse_functions}
+# persistence
+persist_fc = function(train,holdout) {
+  mse <- 0
+  fc <- train[length(train)]
+  fcs <- c(fc)
+  yt <- holdout[1]
+  fcerror <- yt-fc
+  mse <- mse + fcerror^2
+  
+  for (i in 2:length(holdout)) {
+    yt <- holdout[i]
+    fc <- holdout[i-1]
+    fcs <- append(fcs, fc)
+    fcerror <- yt-fc
+    mse <- mse + fcerror^2
+  }
+  
+  rmse <- sqrt(mse / length(holdout))
+  
+  list(fc = fcs, rmse = rmse)
+}
+
+# average of training set
+iid_fc = function(train,holdout) {
+  mse <- 0
+  fc <- mean(train)
+  fcs <- rep(fc, length(holdout)) # same forecast length(holdout) times
+  
+  for (i in 1:length(holdout)) {
+    yt <- holdout[i]
+    fcerror <- yt-fc
+    mse <- mse + fcerror^2
+  }
+  
+  rmse <- sqrt(mse / length(holdout))
+  
+  list(fc = fcs, rmse = rmse)
+}
+
+```
+
+
+
+```{r train_holdout}
+
+# train/holdout split
+
+ntrain <- 1257 # leaves 104 holdout (2 years)
+y <- df$spread
+n <- length(y)
+nholdout <- n-ntrain
+train_y <- y[1:ntrain]
+holdout <- y[(ntrain+1):length(y)]
+
+```
+
+
+```{r persistence_iid}
+# Test two baseline forecasting methods: persistence and iid
+# Persistence model
+persist <- persist_fc(train_y, holdout)
+cat("Persistence Holdout RMSE: ",persist$rmse |> round(4),"\n")
+
+# # IID model: forecast using mean of training set
+iid <- iid_fc(train_y, holdout)
+cat("Average of training set Holdout RMSE: ",iid$rmse |> round(3),"\n")
+
+# Notes: iid performs much worse than persistence; persistence does decently
+```
+

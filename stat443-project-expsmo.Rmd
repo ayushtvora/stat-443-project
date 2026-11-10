@@ -1,0 +1,122 @@
+---
+title: "stat443-project-expsmo"
+output: pdf_document
+date: "2026-04-09"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(readr)
+library(dplyr)
+library(forecast)
+library(zoo)
+library(ggplot2)
+```
+
+
+```{r prepare_data}
+url <- paste0(
+  "https://raw.githubusercontent.com/ShahrukhP15/",
+  "Time-Series-Forecasting-of-U.S.-Fuel-Price-Spreads/",
+  "refs/heads/main/PET_PRI_GND_DCUS_NUS_W.csv"
+)
+df <- read_csv(file = url, show_col_types = FALSE)
+
+df <- df |>
+  mutate(
+    Date = as.Date(Date, format = "%m/%d/%Y"),
+    gasoline = A1,
+    diesel = D1,
+    spread = gasoline - diesel
+  ) |>
+  arrange(Date) |>
+  select(Date, gasoline, diesel, spread)
+
+```
+
+
+```{r train_holdout}
+
+# train/holdout split
+
+ntrain <- 1257 # leaves 104 holdout (2 years)
+y <- df$spread
+n <- length(y)
+nholdout <- n-ntrain
+train_y <- y[1:ntrain]
+holdout <- y[(ntrain+1):length(y)]
+
+```
+
+```{r holt}
+# Use Holt's linear method
+holt_fit <- HoltWinters(train_y, gamma = FALSE)
+
+alpha <- holt_fit$alpha
+beta  <- holt_fit$beta
+
+l <- holt_fit$coefficients["a"]
+b <- holt_fit$coefficients["b"]
+
+fc_vec <- numeric(nholdout)
+
+for(i in 1:nholdout) {
+  fc_vec[i] <- l + b
+  
+  y_obs <- holdout[i]
+  
+  
+  l_old <- l
+  
+  # update level and trend
+  l <- alpha * y_obs + (1 - alpha) * (l + b)
+  b <- beta * (l - l_old) + (1 - beta) * b
+}
+
+rmse_holt <- sqrt(mean((holdout - fc_vec)^2, na.rm = TRUE))
+
+cat("Holt Linear Holdout RMSE:", rmse_holt, "\n")
+# cat("Alpha:", alpha, "\n")
+# cat("Beta:", beta, "\n")
+
+
+```
+
+
+```{r hw}
+# fit seasonal Holt-Winters, trying periods of 26 and 52
+
+for (m in c(26, 52)) {
+  hw_fit <- HoltWinters(ts(train_y, frequency = m))
+  
+  alpha <- hw_fit$alpha
+  beta <- hw_fit$beta
+  gamma <- hw_fit$gamma
+  
+  l <- hw_fit$coefficients["a"]
+  b <- hw_fit$coefficients["b"]
+  
+  s_vector <- hw_fit$coefficients[3:(m+2)]
+  
+  fc_vec <- numeric(nholdout)
+  
+  for (i in 1:nholdout) {
+    fc_vec[i] <- l + b + s_vector[1]
+    
+    y_obs <- holdout[i]
+    
+    # update level and trend
+    l_old <- l
+    l <- alpha * (y_obs - s_vector[1]) + (1 - alpha) * (l + b)
+    b <- beta * (l - l_old) + (1 - beta) * b
+    
+    # update seasonal component
+    s_new <- gamma * (y_obs - l) + (1 - gamma) * s_vector[1]
+    s_vector <- c(s_vector[-1], s_new)
+  }
+  
+  rmse <- sqrt(mean((holdout - fc_vec)^2, na.rm = TRUE))
+  cat("Seasonal Holt-Winters Holdout RMSE (period ",m,"):", rmse, "\n")
+}
+```

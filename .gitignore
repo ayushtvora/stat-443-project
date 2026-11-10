@@ -1,0 +1,10 @@
+.Rhistory
+.RData
+.Rproj.user/
+*_cache/
+*_files/
+
+# Outputs written when the Rmd files are knitted
+*_candidates.csv
+stat443-project-*.pdf
+stat443-project-*.html

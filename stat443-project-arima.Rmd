@@ -1,0 +1,163 @@
+---
+title: "stat443-project-arima"
+output: pdf_document
+date: "2026-04-09"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(readr)
+library(dplyr)
+library(forecast)
+library(zoo)
+library(ggplot2)
+```
+
+
+```{r prepare_data}
+df <- read_csv(file = "https://raw.githubusercontent.com/ShahrukhP15/Time-Series-Forecasting-of-U.S.-Fuel-Price-Spreads/refs/heads/main/PET_PRI_GND_DCUS_NUS_W.csv", show_col_types=F) |>
+  mutate(
+    Date = as.Date(Date, format = "%m/%d/%Y"),
+    gasoline = A1,
+    diesel = D1,
+    spread = gasoline - diesel
+  ) |>
+  arrange(Date) |>
+  select(Date, gasoline, diesel, spread)
+
+```
+
+
+
+```{r rmse_functions}
+
+# fixed parameters from training set for forecasting
+# adapted from arima-employee-wages.Rmd
+
+arma_fc = function(tsdata,ntrain,order,seasonal=list(order=c(0,0,0),period=NA),
+                   method="ML",traincoef,include.mean=TRUE) { 
+  obj = arima(tsdata,order=order,seasonal=seasonal,init=traincoef,fixed=traincoef,
+              method=method, include.mean=include.mean,
+              optim.control=list(maxit=0)) # no log-likelihood iterations
+  fc = tsdata - obj$residuals
+  
+  ntotal = length(tsdata)
+  holdout_fc = fc[(ntrain+1):ntotal]
+  holdout = tsdata[(ntrain+1):ntotal]
+  
+  rmse = sqrt(mean((holdout-holdout_fc)^2))
+  list(rmse=rmse, fc=holdout_fc)
+}
+```
+
+
+```{r train_holdout}
+
+# train/holdout split
+
+ntrain <- 1257 # leaves 104 holdout (2 years)
+y <- df$spread
+n <- length(y)
+nholdout <- n-ntrain
+train_y <- y[1:ntrain]
+holdout <- y[(ntrain+1):length(y)]
+
+```
+
+
+
+```{r auto_arima}
+# call auto.arima for a starting point
+
+# auto.arima will suggest ARIMA(3,1,2), which has low AIC
+# but not necessarily lowest holdout RMSE
+
+auto_fit <- auto.arima(train_y)
+print(auto_fit)
+
+```
+
+
+```{r arima_search}
+# search over slightly varied ARIMA parameters
+arima_candidates <- list(
+  c(2,1,1), c(2,1,2), c(2,1,3),
+  c(3,1,1), c(3,1,2), c(3,1,3),
+  c(4,1,1), c(4,1,2), c(4,1,3),
+  c(1,1,1), c(1,1,0), c(1,1,2),
+  c(3,2,2), c(2,2,2), c(3,2,3)
+)
+
+# for each model, calculate the holdout RMSE
+arima_results <- lapply(arima_candidates, function(ord) {
+  arima_model <- arima(train_y, order = ord)
+  
+  fc <- arma_fc(tsdata=y, ntrain=ntrain, order=ord, traincoef=arima_model$coef)
+  
+  data.frame(Model = paste0("ARIMA(", paste(ord, collapse = ","), ")"),
+             Holdout_RMSE = round(fc$rmse, 4))
+  
+}) %>% bind_rows() %>% arrange(Holdout_RMSE)
+
+print(arima_results)
+write.csv(arima_results, "arima_candidates.csv", row.names = FALSE)
+```
+
+
+
+```{r seasonal_arima_search}
+
+# search over candidate seasonal ARIMA models
+seasonal_specs <- list(
+  list(order = c(1,1,0), seasonal = c(1,0,0), period = 26),
+  list(order = c(1,1,0), seasonal = c(1,0,0), period = 52),
+  list(order = c(3,1,2), seasonal = c(1,0,0), period = 52),
+  list(order = c(3,1,2), seasonal = c(1,0,1), period = 52),
+  list(order = c(0,1,1), seasonal = c(0,0,1), period = 26),
+  list(order = c(0,1,1), seasonal = c(0,0,1), period = 52),
+  list(order = c(2,0,1), seasonal = c(1,1,0), period = 26),
+  list(order = c(2,0,1), seasonal = c(1,1,0), period = 52),
+  list(order = c(4,1,3), seasonal = c(1,0,0), period = 26),
+  list(order = c(4,1,3), seasonal = c(1,0,0), period = 52),
+  list(order = c(4,1,3), seasonal = c(1,0,1), period = 26),
+  list(order = c(4,1,3), seasonal = c(1,0,1), period = 52),
+  list(order = c(1,0,1), seasonal = c(1,1,0), period = 52),
+  list(order = c(4,0,3), seasonal = c(1,1,0), period = 26),
+  list(order = c(4,0,3), seasonal = c(1,1,0), period = 52),
+  list(order = c(3,0,2), seasonal = c(1,1,0), period = 26),
+  list(order = c(3,0,2), seasonal = c(1,1,0), period = 52)
+)
+
+seasonal_results <- lapply(seasonal_specs, function(spec) {
+  arima_model <- arima(train_y, order = spec$order,
+                       seasonal = list(order = spec$seasonal, 
+                                       period = spec$period))
+  
+  fc <- arma_fc(tsdata=y, ntrain=ntrain, order=spec$order,
+                seasonal=list(order=spec$seasonal, period=spec$period),
+                traincoef=arima_model$coef)
+  
+  data.frame(Model = paste0("ARIMA(", paste(spec$order, collapse = ","), ")",
+                            "(", paste(spec$seasonal, collapse = ","), ")[", 
+                            paste(spec$period, collapse=","), "]"),
+             Holdout_RMSE = round(fc$rmse, digits=4)
+  )
+}) %>% bind_rows() %>% arrange(Holdout_RMSE)
+
+print(seasonal_results)
+write.csv(seasonal_results, "seasonal_arima_candidates.csv", row.names = FALSE)
+```
+```{r residual plots, warning=FALSE}
+# Fit best ARIMA model on training set only
+best_arima <- arima(train_y, order = c(4,1,3))
+
+# ACF of residuals to check if remaining autocorrelation is present
+# We want most lags to fall within the confidence bounds (white noise)
+ggAcf(best_arima$residuals, main = "ACF of Residuals - ARIMA(4,1,3)")
+
+# Ljung-Box test for residual autocorrelation
+# H0: residuals are uncorrelated (white noise)
+# p-value > 0.05 suggests residuals are consistent with white noise
+Box.test(best_arima$residuals, lag = 20, type = "Ljung-Box")
+```

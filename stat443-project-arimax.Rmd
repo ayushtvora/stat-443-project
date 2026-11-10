@@ -1,0 +1,218 @@
+---
+title: "stat443-project-arimax"
+output: pdf_document
+date: "2026-04-09"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(readr)
+library(dplyr)
+library(forecast)
+library(zoo)
+library(ggplot2)
+```
+
+
+
+```{r prepare_data}
+df <- read_csv(file = "https://raw.githubusercontent.com/ShahrukhP15/Time-Series-Forecasting-of-U.S.-Fuel-Price-Spreads/refs/heads/main/PET_PRI_GND_DCUS_NUS_W.csv", show_col_types=F) 
+
+df <- df |>
+  mutate(
+    Date = as.Date(Date, format = "%m/%d/%Y"),
+    gasoline = A1,
+    diesel = D1,
+    spread = gasoline - diesel
+  ) |>
+  arrange(Date) |>
+  select(Date, gasoline, diesel, spread)
+
+
+heatingoil <- read.csv("heatingoil.csv")
+crudeoil <- read.csv("oilprices.csv")
+
+df_heat <- merge(x=df, y=heatingoil, by="Date", all.x=T)
+
+# resolve issues with some dates having missing data - fill in with the 
+# price of the nearest (preceding) day with data
+
+df_heat$heating_oil[1] <- df_heat$heating_oil[2]
+
+for (i in 2:nrow(df_heat)) {
+  if (is.na(df_heat$heating_oil[i])) {
+    df_heat$heating_oil[i] = df_heat$heating_oil[i-1]
+  }
+}
+
+for (i in 1:nrow(crudeoil)) {
+  if (is.na(crudeoil[i,2])) {
+    crudeoil[i,2] = crudeoil[i-1,2]
+  }
+}
+
+crudeoil <- crudeoil |>
+  rename(Date=observation_date, crude_oil=DCOILWTICO) |>
+  mutate(crude_oil = replace(crude_oil, crude_oil <= 0, 0.01))
+
+df_all <- merge(x=df_heat, y=crudeoil, by="Date")
+```
+
+
+```{r rmse_functions}
+# source: adapted from unemploy-gdp-armax.Rmd
+armax_fc = function(tsdata,ntrain,order,method="ML",traincoef,
+                    include.mean=TRUE,xreg) {
+  obj = arima(tsdata,order=order,init=traincoef,fixed=traincoef,
+     method=method, include.mean=include.mean, xreg=xreg,
+     optim.control=list(maxit=0))
+  # yt = y_{t|t-1} + innov ; fc = yt-innov 
+  fc = tsdata - obj$residuals  
+  ntotal = length(tsdata)
+  holdout_fc = fc[(ntrain+1):ntotal]
+  holdout = tsdata[(ntrain+1):ntotal]
+  rmse = sqrt(mean((holdout-holdout_fc)^2))
+  list(rmse=rmse, fc=holdout_fc)
+}
+```
+
+
+
+```{r train_holdout}
+
+# train/holdout split
+
+ntrain <- 1257 # leaves 104 holdout (2 years)
+y <- df$spread
+n <- length(y)
+nholdout <- n-ntrain
+train_y <- y[1:ntrain]
+holdout <- y[(ntrain+1):length(y)]
+
+```
+
+
+```{r ccf, fig.width=10, fig.height=4}
+par(mfrow = c(1,2))
+ccf(df_all$spread |> diff(), df_all$crude_oil |> diff(),
+    main = "CCF: Spread vs Crude Oil")
+ccf(df_all$spread |> diff(), df_all$heating_oil |> diff(),
+    main = "CCF: Spread vs Heating Oil")
+par(mfrow = c(1,1))
+
+# for both crude and heating oil, the lag of -1 has the tallest bar, 
+# suggesting that a lag of 1 may be the best
+```
+
+
+```{r lagoil}
+df_all <- df_all |>
+  mutate(
+    crude_lag1 = lag(crude_oil, 1),
+    heat_lag1 = lag(heating_oil, 1)
+  )
+
+  
+df_all_lag1 <- df_all |>
+  filter(!is.na(crude_lag1))
+```
+
+
+```{r heatingoil_reg}
+reg_heatingoil <- lm(spread ~ heat_lag1, data=df_all_lag1[1:(ntrain-1),])
+
+plot.ts(reg_heatingoil$residuals)
+
+pred_reg_heatingoil <- predict(reg_heatingoil, newdata=df_all_lag1[ntrain:(n-1),])
+rmse_reg_heatingoil <- sqrt(mean((holdout-pred_reg_heatingoil)^2))
+cat("RMSE of reg_heatingoil:", rmse_reg_heatingoil, "\n")
+
+resid_reg_heatingoil_auto <- auto.arima(reg_heatingoil$residuals)
+
+summary(reg_heatingoil)
+print(resid_reg_heatingoil_auto)
+
+# auto.arima on residuals of reg_heatingoil suggests ARIMA(3,1,2)
+```
+
+```{r crudeoil_reg}
+reg_crudeoil <- lm(spread ~ crude_oil, data=df_all_lag1[1:(ntrain-1),])
+
+plot.ts(reg_crudeoil$residuals)
+
+pred_reg_crudeoil <- predict(reg_crudeoil, newdata=df_all_lag1[ntrain:(n-1),])
+rmse_reg_crudeoil <- sqrt(mean((holdout-pred_reg_crudeoil)^2))
+cat("RMSE of reg_crudeoil:", rmse_reg_crudeoil, "\n")
+
+resid_reg_crudeoil_auto <- auto.arima(reg_crudeoil$residuals)
+
+summary(reg_crudeoil)
+print(resid_reg_crudeoil_auto)
+
+# auto.arima on residuals of reg_crudeoil suggests ARIMA(3,1,2)
+
+```
+
+
+```{r crudeheat_reg}
+reg_crudeheat <- lm(spread ~ crude_lag1 + heat_lag1, data=df_all_lag1[1:(ntrain-1),])
+
+plot.ts(reg_crudeheat$residuals)
+
+pred_reg_crudeheat <- predict(reg_crudeheat, newdata=df_all_lag1[ntrain:(n-1),])
+rmse_reg_crudeheat <- sqrt(mean((holdout-pred_reg_crudeheat)^2))
+cat("RMSE of reg_crudeheat:", rmse_reg_crudeheat, "\n")
+
+resid_reg_crudeheat_auto <- auto.arima(reg_crudeheat$residuals)
+
+summary(reg_crudeheat)
+print(resid_reg_crudeheat_auto)
+
+# auto.arima on residuals of reg_crudeheat suggests ARIMA(2,0,2)
+
+```
+```{r arimax_search}
+xregs <- list(
+  heat_lag1 = as.matrix(df_all_lag1$heat_lag1),
+  crude_lag1 = as.matrix(df_all_lag1$crude_lag1),
+  crudeheat_lag1 = as.matrix(df_all_lag1 |> select(crude_lag1, heat_lag1))
+)
+
+orders <- list(
+  c(3,1,2), c(2,0,2), c(4,1,3),
+  c(3,1,1), c(3,0,2), c(3,1,3),
+  c(3,0,3), c(2,0,3), c(2,0,1)
+)
+
+armax_results <- lapply(names(xregs), function(name) {
+  xreg <- as.matrix(xregs[[name]])
+  
+  df <- data.frame()
+  
+  for (ord in orders) {
+    fit <- arima(df_all_lag1$spread[1:(ntrain-1)], order = ord,
+                 xreg = xreg[1:(ntrain-1), , drop = F], include.mean = T)
+    
+    fc <- armax_fc(tsdata = df_all_lag1$spread, ntrain = ntrain-1, 
+                   order = ord, traincoef = fit$coef, xreg = xreg,
+                   include.mean = T)
+    
+    z <- data.frame(Exogenous_Variable = paste0(name, " with ARIMA(", paste(ord, collapse = ","),
+                                     ") on residuals"),
+                    Holdout_RMSE = fc$rmse |> round(4))
+    
+    df <- bind_rows(df, z)
+  }
+  
+  df
+  
+}) |> bind_rows() |> arrange(Holdout_RMSE)
+
+
+print(armax_results)
+write.csv(armax_results, "armax_candidates.csv", row.names = FALSE)
+
+```
+
+
